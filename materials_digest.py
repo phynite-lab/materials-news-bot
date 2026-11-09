@@ -448,6 +448,24 @@ def detect_premier_journal(text: str, source_name: str = "") -> Optional[str]:
             if not valid_matter:
                 continue
 
+        # Disambiguate polysemous word: "nature" (common noun vs flagship journal)
+        if match_lower == "nature":
+            valid_nature = False
+            for m in re.finditer(r"\bNature\b", text):
+                start, end = m.start(), m.end()
+                prefix = text[max(0, start - 25):start].lower()
+                suffix = text[end:min(len(text), end + 25)].lower()
+                # In free text or arXiv, "nature" is usually a noun (e.g. "dark nature", "in nature")
+                # Require explicit publication context (e.g. "published in Nature", "Nature (2026)")
+                if any(w in prefix for w in ["published in", "accepted in", "to appear in", "in press"]):
+                    valid_nature = True
+                    break
+                if re.search(r"^\s*[,;]?\s*(?:vol\.?\s*\d+|\(\d{4}\)|\d{4})", suffix):
+                    valid_nature = True
+                    break
+            if not valid_nature:
+                continue
+
         # Standardize casing
         if match_str.upper() in ("PRL", "PRX", "JACS", "PRB"):
             return match_str.upper()

@@ -88,6 +88,20 @@ class TestJournalDetection(unittest.TestCase):
         text = "Researchers report novel spin states in Physical Review Letters."
         self.assertEqual(detect_premier_journal(text), "Physical Review Letters")
 
+    def test_detect_nature_disambiguation_false_positives(self):
+        text1 = "We analyze the excitonic states, identifying their bright or dark nature for each stacking."
+        text2 = "Understanding the quantum nature of topological insulators in high magnetic fields."
+        text3 = "These interactions are by nature non-local and dependent on temperature."
+        self.assertIsNone(detect_premier_journal(text1))
+        self.assertIsNone(detect_premier_journal(text2))
+        self.assertIsNone(detect_premier_journal(text3))
+
+    def test_detect_nature_disambiguation_true_citations(self):
+        text1 = "Accepted in Nature (2026). Here we show room-temperature superconductivity."
+        text2 = "This discovery was published in Nature, vol. 630, pages 123-128."
+        self.assertEqual(detect_premier_journal(text1), "Nature")
+        self.assertEqual(detect_premier_journal(text2), "Nature")
+
 
 class TestImpactScoring(unittest.TestCase):
     def test_scoring_title_multiplier(self):
