@@ -329,7 +329,7 @@ def extract_doi_link(url: str, timeout: int = 8) -> Optional[str]:
         headers={
             "User-Agent": (
                 "Mozilla/5.0 (compatible; MaterialsNewsDigestBot/2.0; "
-                "+https://github.com/jauhar-nr/materials-news-bot)"
+                "+https://github.com/phynite-lab/materials-news-bot)"
             ),
         },
     )
@@ -633,7 +633,7 @@ def fetch_feed(feed_cfg: Dict[str, Any], timeout: int = 15) -> List[Dict[str, An
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (compatible; MaterialsNewsDigestBot/2.0; "
-            "+https://github.com/jauhar-nr/materials-news-bot)"
+            "+https://github.com/phynite-lab/materials-news-bot)"
         ),
         "Accept": "application/rss+xml, application/xml, text/xml, */*",
     }
