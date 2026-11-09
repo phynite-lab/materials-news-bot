@@ -19,6 +19,8 @@ from materials_digest import (
     clean_url,
     detect_premier_journal,
     fetch_feed,
+    get_journal_tier,
+    is_qualifying_candidate,
     load_history,
     parse_date,
     publish_saved_candidates,
@@ -626,6 +628,96 @@ class TestRunDigest(unittest.TestCase):
             mock_webhook.assert_called_once()
             _, kwargs = mock_webhook.call_args
             self.assertTrue(kwargs.get("mention_everyone"))
+
+
+class TestTieredQualityGate(unittest.TestCase):
+    def test_get_journal_tier(self):
+        # Tier 1 Flagships
+        self.assertEqual(get_journal_tier("Nature Materials"), 1)
+        self.assertEqual(get_journal_tier("Nature Energy"), 1)
+        self.assertEqual(get_journal_tier("Nature"), 1)
+        self.assertEqual(get_journal_tier("Science"), 1)
+        self.assertEqual(get_journal_tier("Physical Review Letters"), 1)
+        self.assertEqual(get_journal_tier("PRX"), 1)
+
+        # Tier 2 Specialized Materials
+        self.assertEqual(get_journal_tier("Advanced Materials"), 2)
+        self.assertEqual(get_journal_tier("ACS Nano"), 2)
+        self.assertEqual(get_journal_tier("JACS"), 2)
+
+        # Tier 3 Specialized Solid-State & Materials
+        self.assertEqual(get_journal_tier("Physical Review Materials"), 3)
+        self.assertEqual(get_journal_tier("Physical Review B"), 3)
+        self.assertEqual(get_journal_tier("Acta Materialia"), 3)
+
+        # Unindexed / Preprint
+        self.assertEqual(get_journal_tier(None, "arXiv"), 0)
+        self.assertEqual(get_journal_tier(None, "Unknown Blog"), 0)
+
+    def test_is_qualifying_candidate_tier1(self):
+        # Tier 1 qualifies at standard 115.0 pts
+        qualifies, reason = is_qualifying_candidate(
+            score=120.0,
+            detected_journal="Nature Materials",
+            source_name="Nature Materials",
+            tier1_min_score=115.0,
+            specialized_min_score=145.0,
+        )
+        self.assertTrue(qualifies)
+        self.assertIn("Tier-1 Flagship", reason)
+
+        # Tier 1 below standard threshold fails
+        qualifies, reason = is_qualifying_candidate(
+            score=95.0,
+            detected_journal="Nature Energy",
+            source_name="Nature Energy",
+            tier1_min_score=115.0,
+            specialized_min_score=145.0,
+        )
+        self.assertFalse(qualifies)
+
+    def test_is_qualifying_candidate_tier2_and_tier3(self):
+        # Routine paper in PRMaterials (score 121.0) fails specialized breakthrough threshold (145.0)
+        qualifies, reason = is_qualifying_candidate(
+            score=121.0,
+            detected_journal="Physical Review Materials",
+            source_name="Physical Review Materials",
+            tier1_min_score=115.0,
+            specialized_min_score=145.0,
+        )
+        self.assertFalse(qualifies)
+        self.assertIn("Specialized/Tier-3", reason)
+
+        # Exceptional breakthrough in PRMaterials (score 155.0) passes
+        qualifies, reason = is_qualifying_candidate(
+            score=155.0,
+            detected_journal="Physical Review Materials",
+            source_name="Physical Review Materials",
+            tier1_min_score=115.0,
+            specialized_min_score=145.0,
+        )
+        self.assertTrue(qualifies)
+
+        # Routine paper in Advanced Materials (score 125.0) fails specialized threshold
+        qualifies, _ = is_qualifying_candidate(
+            score=125.0,
+            detected_journal="Advanced Materials",
+            source_name="Phys.org",
+            tier1_min_score=115.0,
+            specialized_min_score=145.0,
+        )
+        self.assertFalse(qualifies)
+
+    def test_is_qualifying_candidate_preprints(self):
+        # Preprint without flagship journal capped at 75 fails 145 threshold
+        qualifies, _ = is_qualifying_candidate(
+            score=75.0,
+            detected_journal=None,
+            source_name="arXiv",
+            tier1_min_score=115.0,
+            specialized_min_score=145.0,
+        )
+        self.assertFalse(qualifies)
 
 
 if __name__ == "__main__":

@@ -60,7 +60,7 @@ DEFAULT_FEEDS = [
         "category": "Materials Physics",
         "url": "https://feeds.aps.org/rss/recent/prmaterials.xml",
         "type": "rss",
-        "curated_boost": 20.0,
+        "curated_boost": 0.0,
     },
     {
         "name": "ScienceDaily",
@@ -472,6 +472,54 @@ def detect_premier_journal(text: str, source_name: str = "") -> Optional[str]:
         return match_str.title()
 
     return None
+
+
+def get_journal_tier(detected_journal: Optional[str], source_name: str = "") -> int:
+    """Classifies an article or venue into a quality tier:
+    1: Tier 1 Flagship (Nature, Science, Nature Materials, Nature Energy, PRL, PRX, etc.)
+    2: Tier 2 Dedicated High-Impact Materials (Advanced Materials, ACS Nano, JACS, Matter, etc.)
+    3: Tier 3 Specialized Solid-State & Materials (Physical Review Materials, PRB, Acta Materialia, etc.)
+    0: Other / Unindexed / Preprint
+    """
+    candidates = [detected_journal, source_name]
+    for c in candidates:
+        if c and c in TIER1_FLAGSHIP_JOURNALS:
+            return 1
+    for c in candidates:
+        if c and c in TIER2_SPECIALIZED_MATERIALS_JOURNALS:
+            return 2
+    for c in candidates:
+        if c and c in TIER3_SPECIALIZED_SOLID_JOURNALS:
+            return 3
+    return 0
+
+
+def is_qualifying_candidate(
+    score: float,
+    detected_journal: Optional[str],
+    source_name: str,
+    tier1_min_score: float = 115.0,
+    specialized_min_score: float = 145.0,
+) -> Tuple[bool, str]:
+    """Evaluates whether a candidate meets the tier-calibrated quality gate.
+
+    - Tier 1 Flagship (Nature, Science, Nature Materials, Nature Energy, PRL, PRX):
+      Standard threshold (score >= tier1_min_score, default: 115.0 pts).
+    - Tier 2 & Tier 3 Specialized (PRMaterials, PRB, Advanced Materials, ACS Nano, etc.):
+      Requires a high breakthrough score (score >= specialized_min_score, default: 145.0 pts).
+    - Unindexed / Preprints (arXiv without detected premier journal):
+      Requires specialized breakthrough score (score >= specialized_min_score).
+    """
+    tier = get_journal_tier(detected_journal, source_name)
+    venue = detected_journal or source_name or "Unindexed"
+    if tier == 1:
+        qualifies = score >= tier1_min_score
+        reason = f"Tier-1 Flagship [{venue}] (Score: {score:.1f} / Min: {tier1_min_score:.1f})"
+        return qualifies, reason
+    else:
+        qualifies = score >= specialized_min_score
+        reason = f"Specialized/Tier-{tier or 'Other'} [{venue}] (Score: {score:.1f} / Req Breakthrough: {specialized_min_score:.1f})"
+        return qualifies, reason
 
 
 def calculate_impact_score(
@@ -981,6 +1029,7 @@ def run_digest(
     webhook_url: Optional[str] = None,
     limit: int = 1,
     min_score: float = 115.0,
+    tier2_min_score: float = 145.0,
     days_window: Optional[int] = None,
     query: Optional[str] = None,
     mention_everyone: bool = False,
@@ -990,7 +1039,10 @@ def run_digest(
     verbose: bool = False,
 ) -> int:
     """Main execution flow with flexible quality-gating, staging review, or targeted query."""
-    logger.info("Starting Materials News Digest run (limit=%d, min_score=%.1f, staging=%s)", limit, min_score, staging)
+    logger.info(
+        "Starting Materials News Digest run (limit=%d, min_score=%.1f, tier2_min_score=%.1f, staging=%s)",
+        limit, min_score, tier2_min_score, staging,
+    )
     history = load_history(history_file)
     logger.info("Loaded %d previously broadcast items from history", len(history))
 
@@ -1037,9 +1089,29 @@ def run_digest(
         ]
         logger.info("Found %d unseen candidates after history filtering", len(fresh_candidates))
 
-        # Quality Gate: Strict minimum impact threshold
-        qualifying = [a for a in fresh_candidates if a["score"] >= min_score]
-        logger.info("%d candidates pass quality threshold (>= %.1f pts)", len(qualifying), min_score)
+        # Quality Gate: Tier-calibrated minimum impact threshold
+        # - Tier 1 Flagships (Nature, Science, Nature Materials/Energy, PRL, PRX):
+        #   Standard threshold (score >= min_score, default: 115.0 pts).
+        # - Tier 2/3 Specialized Journals (PRMaterials, PRB, Advanced Materials, ACS Nano):
+        #   Strict breakthrough threshold (score >= tier2_min_score, default: 145.0 pts).
+        qualifying = []
+        for a in fresh_candidates:
+            ok, reason = is_qualifying_candidate(
+                score=a["score"],
+                detected_journal=a.get("premier_journal"),
+                source_name=a.get("source", ""),
+                tier1_min_score=min_score,
+                specialized_min_score=tier2_min_score,
+            )
+            if ok:
+                qualifying.append(a)
+            elif verbose:
+                logger.debug("Rejected by quality gate: %s - %s", reason, a["title"])
+
+        logger.info(
+            "%d candidates pass quality threshold (Tier-1 >= %.1f pts, Specialized >= %.1f pts)",
+            len(qualifying), min_score, tier2_min_score,
+        )
 
         # Sort descending by impact score
         qualifying.sort(key=lambda x: x["score"], reverse=True)
@@ -1061,9 +1133,10 @@ def run_digest(
 
         if not selected:
             logger.info(
-                "Quality Gate Active: No research met the high-impact threshold (>= %.1f pts) today. "
+                "Quality Gate Active: No research met the high-impact threshold (Tier-1 >= %.1f pts, Specialized >= %.1f pts) today. "
                 "Remaining silent to prevent channel noise.",
                 min_score,
+                tier2_min_score,
             )
             if save_candidate:
                 os.makedirs(os.path.dirname(os.path.abspath(save_candidate)), exist_ok=True)
@@ -1134,7 +1207,8 @@ def main() -> None:
     parser.add_argument("--history", default="data/history.json", help="Path to history JSON file")
     parser.add_argument("--webhook-url", default=os.environ.get("DISCORD_WEBHOOK_URL"), help="Discord Webhook URL")
     parser.add_argument("--limit", type=int, default=1, help="Number of top articles to select (default: 1)")
-    parser.add_argument("--min-score", type=float, default=115.0, help="Minimum impact threshold (default: 115.0)")
+    parser.add_argument("--min-score", type=float, default=115.0, help="Minimum impact threshold for Tier-1 flagships (default: 115.0)")
+    parser.add_argument("--tier2-min-score", type=float, default=145.0, help="Minimum breakthrough threshold for Tier-2/3 specialized journals (default: 145.0)")
     parser.add_argument("--days", type=int, default=7, help="Filter articles published within the last N days (default: 7)")
     parser.add_argument("--query", type=str, default=None, help="Target a specific article by keyword/title")
     parser.add_argument("--mention-everyone", action="store_true", help="Include @everyone mention in message")
@@ -1163,6 +1237,7 @@ def main() -> None:
             webhook_url=args.webhook_url,
             limit=args.limit,
             min_score=args.min_score,
+            tier2_min_score=args.tier2_min_score,
             days_window=args.days,
             query=args.query,
             mention_everyone=args.mention_everyone,
