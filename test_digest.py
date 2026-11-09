@@ -236,6 +236,26 @@ class TestImpactScoring(unittest.TestCase):
         self.assertEqual(journal, "Nature")
         self.assertGreater(score, 115.0)
 
+    def test_scoring_editorial_correction_disqualification(self):
+        score, _, _, breakdown = calculate_impact_score(
+            title="Author Correction: Perovskite lattice compliance enables efficient and stable bifacial perovskite/silicon tandem photovoltaics",
+            description="Author Correction: Perovskite lattice compliance...",
+            pub_date=None,
+            source_name="Nature Energy",
+            curated_boost=20.0,
+        )
+        self.assertEqual(score, 0.0)
+        self.assertEqual(breakdown.get("disqualified"), "editorial_notice")
+
+    def test_scoring_erratum_disqualification(self):
+        score, _, _, breakdown = calculate_impact_score(
+            title="Erratum: Topological phase transition in magnetic monolayer crystals",
+            description="Errata details...",
+            pub_date=None,
+        )
+        self.assertEqual(score, 0.0)
+        self.assertEqual(breakdown.get("disqualified"), "editorial_notice")
+
 
 class TestHistoryTracking(unittest.TestCase):
     def test_load_and_save_history(self):

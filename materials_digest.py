@@ -149,6 +149,23 @@ ANCHOR_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+# Editorial & Correction notices that must be excluded from news broadcasts
+EDITORIAL_EXCLUSIONS = [
+    r"\bauthor correction\b",
+    r"\bpublisher correction\b",
+    r"\berratum\b",
+    r"\bcorrigendum\b",
+    r"\bretraction\b",
+    r"\bexpression of concern\b",
+    r"\bmatters arising\b",
+    r"\breply to:?\b",
+    r"\bcomment on:?\b",
+]
+EDITORIAL_REGEX = re.compile(
+    "|".join(EDITORIAL_EXCLUSIONS),
+    re.IGNORECASE,
+)
+
 # Negative Categories: severe penalty to disqualify non-materials fields
 NEGATIVE_CATEGORIES = {
     "quantum_computing": {
@@ -456,6 +473,10 @@ def calculate_impact_score(
     desc_lower = description.lower()
     full_lower = full_text.lower()
     
+    # 0. Editorial Notice Disqualification (exclude errata, author corrections, retractions)
+    if EDITORIAL_REGEX.search(title):
+        return 0.0, [], None, {"disqualified": "editorial_notice", "title": title}
+    
     # 1. Material Anchor Gating & Scoring
     title_anchors = set(ANCHOR_REGEX.findall(title))
     desc_anchors = set(ANCHOR_REGEX.findall(description))
@@ -664,6 +685,10 @@ def fetch_feed(feed_cfg: Dict[str, Any], timeout: int = 15) -> List[Dict[str, An
         raw_title = title_el.text if (title_el is not None and title_el.text) else ""
         title = clean_text(raw_title)
         if not title:
+            continue
+
+        if EDITORIAL_REGEX.search(title):
+            logger.info("Skipping editorial/correction notice: %s", title)
             continue
 
         link_el = item.find("{*}link")
