@@ -104,6 +104,48 @@ class TestJournalDetection(unittest.TestCase):
         self.assertEqual(detect_premier_journal(text1), "Nature")
         self.assertEqual(detect_premier_journal(text2), "Nature")
 
+    def test_detect_compound_journals_beat_single_word_parent(self):
+        text1 = "A research team at HKUST published the perovskite study in the journal Nature Photonics."
+        text2 = "A recent study published in Nature Electronics and carried out by nanoGUNE researchers."
+        text3 = "The findings were published in Science Advances yesterday."
+        self.assertEqual(detect_premier_journal(text1), "Nature Photonics")
+        self.assertEqual(detect_premier_journal(text2), "Nature Electronics")
+        self.assertEqual(detect_premier_journal(text3), "Science Advances")
+
+    def test_detect_science_matter_joule_disambiguation(self):
+        # False positives from institution names, physics phenomena, and sister/compound journals
+        fp1 = "Jun Nishida, assistant professor at the Institute for Molecular Science (IMS), Japan, published in Phys. Rev. A."
+        fp2 = "Researchers at The Hong Kong University of Science and Technology studied perovskite films."
+        fp3 = "Our approach enables magnon modulation without Joule heating."
+        fp4 = "Matter starts to behave differently at extremely low temperatures in condensed matter."
+        fp5 = "The study was published in Journal of Materials Science (2026)."
+        fp6 = "Their results were published in Nature Chemistry."
+        fp7 = "The work was published in Science Robotics."
+        fp8 = "Synthesizing novel advanced materials at Center for Advanced Materials."
+        for text in (fp1, fp2, fp3, fp4, fp5, fp6, fp7, fp8):
+            self.assertIsNone(detect_premier_journal(text), f"False positive on: {text}")
+
+        # True citations
+        self.assertEqual(detect_premier_journal("The study, published in Science, provides a new view."), "Science")
+        self.assertEqual(detect_premier_journal("Accepted in Matter (2026) for battery electrolytes."), "Matter")
+        self.assertEqual(detect_premier_journal("The paper appeared in Joule, vol. 10."), "Joule")
+        self.assertEqual(detect_premier_journal("Published in Advanced Materials."), "Advanced Materials")
+
+    def test_detect_arxiv_reference_citations_excluded(self):
+        # Citing prior Science paper inside arXiv abstract must NOT promote preprint
+        ref_cite = "This clarifies the enhanced mobility reported by Pham et al. [Science 384, 307-312 (2024)]."
+        self.assertIsNone(detect_premier_journal(ref_cite, source_name="arXiv"))
+
+        # Explicit self-publication notice IS accepted
+        self_pub = "Accepted in PRL. Here we demonstrate room-temperature kagome magnetism."
+        self.assertEqual(detect_premier_journal(self_pub, source_name="arXiv"), "PRL")
+
+    def test_detect_canonical_casing_preserved_for_tiers(self):
+        self.assertEqual(detect_premier_journal("Published in ACS Nano yesterday."), "ACS Nano")
+        self.assertEqual(get_journal_tier("ACS Nano"), 2)
+        self.assertEqual(detect_premier_journal("Published in APL Materials yesterday."), "APL Materials")
+        self.assertEqual(get_journal_tier("APL Materials"), 3)
+
 
 class TestImpactScoring(unittest.TestCase):
     def test_scoring_title_multiplier(self):

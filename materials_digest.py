@@ -111,8 +111,11 @@ TIER3_SPECIALIZED_SOLID_JOURNALS = [
 ]
 
 PREMIER_JOURNALS = TIER1_FLAGSHIP_JOURNALS + TIER2_SPECIALIZED_MATERIALS_JOURNALS + TIER3_SPECIALIZED_SOLID_JOURNALS
+# Sort longest-first so compound titles (e.g. "Nature Photonics", "Science Advances")
+# match before generic single-word parents ("Nature", "Science") in regex alternation.
+_JOURNALS_BY_LENGTH = sorted(PREMIER_JOURNALS, key=len, reverse=True)
 JOURNAL_REGEX = re.compile(
-    r"\b(" + "|".join(re.escape(j) for j in PREMIER_JOURNALS) + r")\b",
+    r"\b(" + "|".join(re.escape(j) for j in _JOURNALS_BY_LENGTH) + r")\b",
     re.IGNORECASE,
 )
 
@@ -404,72 +407,97 @@ def parse_date(date_str: Optional[str]) -> Optional[datetime.datetime]:
     return None
 
 
+_CANONICAL_JOURNAL_MAP = {j.lower(): j for j in PREMIER_JOURNALS}
+_ACRONYM_JOURNALS = {"prl", "prx", "prb", "jacs", "apl"}
+_STRICT_CONTEXT_JOURNALS = {"nature", "science", "matter", "joule", "advanced materials"}
+
+_SELF_PUB_PREFIX_RE = re.compile(
+    r"(?:published\s+in|accepted\s+(?:in|by|for\s+publication\s+in)|"
+    r"to\s+appear\s+in|will\s+appear\s+in|in\s+press\s+(?:in|at))\s+"
+    r"(?:the\s+journal\s+)?[\"'(*\[]*\s*$",
+    re.IGNORECASE,
+)
+_REFERENCE_CITE_PREFIX_RE = re.compile(
+    r"(?:\bet\s+al\.?|\brefs?\.|\bsuch\s+as\b|\bprevious\b|\bearlier\b|\bwork\s+by\b)",
+    re.IGNORECASE,
+)
+_PUB_CONTEXT_PREFIX_RE = re.compile(
+    r"(?:published\s+in|accepted\s+(?:in|by|for\s+publication\s+in)|"
+    r"to\s+appear\s+in|appeared\s+in|appears\s+in|reported\s+in|"
+    r"in\s+press\s+(?:in|at)|will\s+appear\s+in|in\s+the\s+journal|"
+    r"(?:the\s+)?journal)\s*[\"'(*\[]*\s*$",
+    re.IGNORECASE,
+)
+_CITATION_SUFFIX_RE = re.compile(
+    r"^\s*[\"'*)\]]*\s*[,;:]?\s*(?:vol\.?\s*\d+|\(\s*\d{4}\s*\)|(?:19|20)\d{2}\b)",
+    re.IGNORECASE,
+)
+_MODIFIER_PREFIX_RE = re.compile(
+    r"\b(?:of|for|and|&|by|molecular|materials|chemical|physical|surface|"
+    r"applied|computer|data|natural|life|social|basic|modern|earth|"
+    r"planetary|climate|food|polymer|nuclear|organic|condensed|dark|soft|"
+    r"active|topological|quantum|granular|ordinary|gray|grey|bright|high|"
+    r"low|per|no|without|via)\s*[\"'(*\[]*\s*$",
+    re.IGNORECASE,
+)
+_NON_JOURNAL_SUFFIX_RE = re.compile(
+    r"^(?:\s*-?\s*(?:thomson|heating|effect|museum|daily|news|direct|"
+    r"foundation|council|ministry|library|center|centre|institute|"
+    r"university|department|laboratory)\b|\s+and\s+technology\b|\s+of\b)",
+    re.IGNORECASE,
+)
+_SISTER_JOURNAL_SUFFIX_RE = re.compile(
+    r"^\s+(?:Chemistry|Catalysis|Synthesis|Sustainability|Reviews|Methods|"
+    r"Biotechnology|Medicine|Computational|Machine|Astronomy|Geoscience|"
+    r"Ecology|Climate|Aging|Water|Food|Mental|Human|Plant|Microbiology|"
+    r"Immunology|Genetics|Neuroscience|Robotics|Translational|Signaling|"
+    r"Bulletin|Direct|News|Daily)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_journal_match(text: str, m: re.Match, source_name: str = "") -> bool:
+    """Validates that a regex journal match represents a genuine publication venue."""
+    raw = m.group(0).strip()
+    lower = raw.lower()
+    start, end = m.start(), m.end()
+    prefix_full = text[max(0, start - 60):start]
+    prefix_near = text[max(0, start - 35):start]
+    suffix_raw = text[end:min(len(text), end + 30)]
+
+    if lower in _ACRONYM_JOURNALS:
+        if raw != raw.upper():
+            return False
+        if lower == "apl" and any(t in prefix_full.lower() for t in ("johns hopkins", "applied physics lab")):
+            return False
+
+    if source_name == "arXiv":
+        if not _SELF_PUB_PREFIX_RE.search(prefix_near) or _REFERENCE_CITE_PREFIX_RE.search(prefix_full):
+            return False
+
+    if lower in _STRICT_CONTEXT_JOURNALS:
+        if not raw.istitle():
+            return False
+        if _MODIFIER_PREFIX_RE.search(prefix_near) or _NON_JOURNAL_SUFFIX_RE.search(suffix_raw):
+            return False
+        if lower in ("nature", "science") and _SISTER_JOURNAL_SUFFIX_RE.search(suffix_raw):
+            return False
+        if not (_PUB_CONTEXT_PREFIX_RE.search(prefix_near) or _CITATION_SUFFIX_RE.search(suffix_raw)):
+            return False
+
+    return True
+
+
 def detect_premier_journal(text: str, source_name: str = "") -> Optional[str]:
     """Detects premier peer-reviewed journal citation in title, body, or source name."""
     if source_name in PREMIER_JOURNALS:
         return source_name
 
-    matches = JOURNAL_REGEX.findall(text)
-    if not matches:
-        return None
-
-    # Pick the most specific match (longest string first), deduplicated
-    matches_sorted = sorted(set(matches), key=len, reverse=True)
-
-    for match in matches_sorted:
-        match_str = match.strip()
-        match_lower = match_str.lower()
-
-        # Disambiguate common polysemous words: "science" and "matter"
-        if match_lower == "science":
-            valid_science = False
-            for m in re.finditer(r"\bScience\b", text):
-                start, end = m.start(), m.end()
-                prefix = text[max(0, start - 25):start].lower()
-                suffix = text[end:min(len(text), end + 25)].lower()
-                if any(w in prefix for w in ["materials", "computer", "surface", "data", "applied", "industrial", "life "]):
-                    continue
-                if any(w in suffix for w in ["and technology", "foundation", "council", "ministry", "daily", "news"]):
-                    continue
-                valid_science = True
-                break
-            if not valid_science:
-                continue
-
-        if match_lower == "matter":
-            valid_matter = False
-            for m in re.finditer(r"\bMatter\b", text):
-                start = m.start()
-                prefix = text[max(0, start - 20):start].lower()
-                if any(w in prefix for w in ["condensed", "dark", "soft", "active", "topological", "granular"]):
-                    continue
-                valid_matter = True
-                break
-            if not valid_matter:
-                continue
-
-        # Disambiguate polysemous word: "nature" (common noun vs flagship journal)
-        if match_lower == "nature":
-            valid_nature = False
-            for m in re.finditer(r"\bNature\b", text):
-                start, end = m.start(), m.end()
-                prefix = text[max(0, start - 25):start].lower()
-                suffix = text[end:min(len(text), end + 25)].lower()
-                # In free text or arXiv, "nature" is usually a noun (e.g. "dark nature", "in nature")
-                # Require explicit publication context (e.g. "published in Nature", "Nature (2026)")
-                if any(w in prefix for w in ["published in", "accepted in", "to appear in", "in press"]):
-                    valid_nature = True
-                    break
-                if re.search(r"^\s*[,;]?\s*(?:vol\.?\s*\d+|\(\d{4}\)|\d{4})", suffix):
-                    valid_nature = True
-                    break
-            if not valid_nature:
-                continue
-
-        # Standardize casing
-        if match_str.upper() in ("PRL", "PRX", "JACS", "PRB"):
-            return match_str.upper()
-        return match_str.title()
+    candidates = sorted(JOURNAL_REGEX.finditer(text), key=lambda m: len(m.group(0)), reverse=True)
+    for m in candidates:
+        if _is_valid_journal_match(text, m, source_name):
+            match_lower = m.group(0).strip().lower()
+            return _CANONICAL_JOURNAL_MAP.get(match_lower, m.group(0).strip())
 
     return None
 
