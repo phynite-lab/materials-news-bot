@@ -39,7 +39,7 @@ on:
 
 concurrency:
   group: daily-digest
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
