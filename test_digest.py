@@ -18,9 +18,12 @@ from materials_digest import (
     clean_text,
     clean_url,
     detect_premier_journal,
+    extract_article_type_from_html,
+    fetch_article_type,
     fetch_feed,
     get_journal_tier,
     is_qualifying_candidate,
+    is_secondary_article_type,
     load_history,
     parse_date,
     publish_saved_candidates,
@@ -313,6 +316,23 @@ class TestImpactScoring(unittest.TestCase):
         )
         self.assertEqual(score, 0.0)
         self.assertEqual(breakdown.get("disqualified"), "editorial_notice")
+
+    def test_scoring_editorial_and_news_views_title_disqualification(self):
+        for title in (
+            "News & Views: Encoding information into topological defects",
+            "Editorial: A funder for Europe",
+            "Perspective: Future solid-state battery electrolytes",
+            "Research Highlight: New 2D superconductor",
+        ):
+            score, _, _, breakdown = calculate_impact_score(
+                title=title,
+                description="Materials summary",
+                pub_date=None,
+                source_name="Nature Materials",
+                curated_boost=20.0,
+            )
+            self.assertEqual(score, 0.0, f"Expected disqualification for: {title}")
+            self.assertEqual(breakdown.get("disqualified"), "editorial_notice")
 
 
 class TestHistoryTracking(unittest.TestCase):
@@ -760,6 +780,136 @@ class TestTieredQualityGate(unittest.TestCase):
             specialized_min_score=145.0,
         )
         self.assertFalse(qualifies)
+
+
+class TestSecondaryArticleFiltering(unittest.TestCase):
+    def test_extract_article_type_from_html_meta_and_datalayer(self):
+        html_meta = '<meta name="citation_article_type" content="News &amp; Views"/>'
+        self.assertEqual(extract_article_type_from_html(html_meta), "News & Views")
+
+        html_reversed = '<meta content="Editorial" name="citation_article_type"/>'
+        self.assertEqual(extract_article_type_from_html(html_reversed), "Editorial")
+
+        html_datalayer = 'window.dataLayer = [{"content":{"contentType":"why it matters"}}];'
+        self.assertEqual(extract_article_type_from_html(html_datalayer), "why it matters")
+
+        html_primary = '<meta name="citation_article_type" content="Article"/>'
+        self.assertEqual(extract_article_type_from_html(html_primary), "Article")
+
+        self.assertIsNone(extract_article_type_from_html("<html><head></head></html>"))
+
+    def test_is_secondary_article_type(self):
+        for sec in ("News & Views", "news & views", "Editorial", "Why it matters", "Perspective", "Author Correction", "Comment"):
+            self.assertTrue(is_secondary_article_type(sec), f"Should reject {sec}")
+
+        for pri in ("Article", "Letter", "Brief Communication", None, ""):
+            self.assertFalse(is_secondary_article_type(pri), f"Should allow {pri}")
+
+    @patch("urllib.request.build_opener")
+    def test_fetch_article_type_supported_and_non_publisher_hosts(self, mock_build_opener):
+        # Non-publisher hosts must skip HTTP check
+        self.assertIsNone(fetch_article_type("https://phys.org/news/2026-11-excitons.html"))
+        mock_build_opener.assert_not_called()
+
+        # Supported Nature URL inspects HTML metadata
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'<meta name="citation_article_type" content="News &amp; Views"/>'
+        mock_resp.__enter__.return_value = mock_resp
+        mock_opener = MagicMock()
+        mock_opener.open.return_value = mock_resp
+        mock_build_opener.return_value = mock_opener
+
+        art_type = fetch_article_type("https://www.nature.com/articles/s41563-026-02798-x")
+        self.assertEqual(art_type, "News & Views")
+        mock_opener.open.assert_called_once()
+
+    @patch("materials_digest.fetch_article_type")
+    @patch("materials_digest.fetch_feed")
+    def test_run_digest_skips_news_and_views_and_promotes_primary_article(self, mock_fetch, mock_fetch_type):
+        mock_fetch.return_value = [
+            {
+                "id": "nv-1",
+                "title": "Encoding information into an embroidery of topological defects in liquid crystals",
+                "link": "https://www.nature.com/articles/s41563-026-02798-x",
+                "description": "Photopatterned alignment layer in liquid crystals.",
+                "source": "Nature Materials",
+                "category": "Materials Science",
+                "score": 132.0,
+                "premier_journal": "Nature Materials",
+                "doi_link": "https://doi.org/10.1038/s41563-026-02798-x",
+                "badges": [],
+            },
+            {
+                "id": "art-1",
+                "title": "Contouring mitigates voiding at the lithium/ceramic electrolyte interface",
+                "link": "https://www.nature.com/articles/s41560-026-02172-w",
+                "description": "Primary research article on solid-state batteries.",
+                "source": "Nature Energy",
+                "category": "Energy Materials",
+                "score": 126.0,
+                "premier_journal": "Nature Energy",
+                "doi_link": "https://doi.org/10.1038/s41560-026-02172-w",
+                "badges": ["Energy Storage & Batteries"],
+            },
+        ]
+        mock_fetch_type.side_effect = (
+            lambda url: "News & Views" if "02798-x" in url else "Article"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hist_file = os.path.join(tmpdir, "history.json")
+            cand_file = os.path.join(tmpdir, "candidate.json")
+            code = run_digest(
+                history_file=hist_file,
+                limit=1,
+                min_score=115.0,
+                staging=True,
+                save_candidate=cand_file,
+                dry_run=True,
+                verbose=False,
+            )
+            self.assertEqual(code, 0)
+            with open(cand_file, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0]["id"], "art-1")
+            self.assertEqual(saved[0]["article_type"], "Article")
+
+    @patch("materials_digest.fetch_article_type")
+    @patch("materials_digest.fetch_feed")
+    def test_run_digest_returns_empty_when_only_news_and_views_qualifies(self, mock_fetch, mock_fetch_type):
+        mock_fetch.return_value = [
+            {
+                "id": "nv-only",
+                "title": "Improving compatibility in mixed-matrix membranes",
+                "link": "https://www.nature.com/articles/s41560-026-02174-8",
+                "description": "Commentary on mixed-matrix membranes.",
+                "source": "Nature Energy",
+                "category": "Energy Materials",
+                "score": 128.0,
+                "premier_journal": "Nature Energy",
+                "doi_link": "https://doi.org/10.1038/s41560-026-02174-8",
+                "badges": ["Energy Storage & Batteries"],
+            }
+        ]
+        mock_fetch_type.return_value = "News & Views"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hist_file = os.path.join(tmpdir, "history.json")
+            cand_file = os.path.join(tmpdir, "candidate.json")
+            code = run_digest(
+                history_file=hist_file,
+                limit=1,
+                min_score=115.0,
+                staging=True,
+                save_candidate=cand_file,
+                dry_run=True,
+                verbose=False,
+            )
+            self.assertEqual(code, 0)
+            with open(cand_file, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            self.assertEqual(saved, [])
 
 
 if __name__ == "__main__":

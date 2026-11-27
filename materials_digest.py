@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import html
+import http.cookiejar
 import json
 import logging
 import os
@@ -163,10 +164,65 @@ EDITORIAL_EXCLUSIONS = [
     r"\bmatters arising\b",
     r"\breply to:?\b",
     r"\bcomment on:?\b",
+    r"\bnews\s*(?:&|and)\s*views\b",
+    r"\bresearch highlight\b",
+    r"\bresearch briefing\b",
+    r"\bbook review\b",
+    r"^\s*editorial\s*[:\-–—]",
+    r"^\s*perspective\s*[:\-–—]",
+    r"^\s*correspondence\s*[:\-–—]",
+    r"^\s*commentary\s*[:\-–—]",
+    r"^\s*obituary\s*[:\-–—]",
 ]
 EDITORIAL_REGEX = re.compile(
     "|".join(EDITORIAL_EXCLUSIONS),
     re.IGNORECASE,
+)
+
+# Non-primary article types extracted from publisher HTML metadata
+# (e.g. <meta name="citation_article_type" ...> or dataLayer contentType)
+SECONDARY_ARTICLE_TYPES = {
+    "news & views",
+    "news and views",
+    "news-and-views",
+    "news",
+    "news feature",
+    "editorial",
+    "comment",
+    "commentary",
+    "correspondence",
+    "perspective",
+    "why it matters",
+    "research highlight",
+    "research briefing",
+    "author correction",
+    "publisher correction",
+    "correction",
+    "erratum",
+    "corrigendum",
+    "retraction",
+    "expression of concern",
+    "matters arising",
+    "reply",
+    "book review",
+    "books & arts",
+    "world view",
+    "obituary",
+    "career",
+    "career feature",
+    "q&a",
+    "amendment",
+    "addendum",
+    "meeting report",
+    "outlook",
+    "feature",
+}
+
+# Publisher domains whose article pages expose citation_article_type / contentType metadata
+ARTICLE_TYPE_CHECK_HOSTS = (
+    "nature.com",
+    "link.springer.com",
+    "science.org",
 )
 
 # Negative Categories: severe penalty to disqualify non-materials fields
@@ -379,6 +435,69 @@ def extract_doi_link(url: str, timeout: int = 8) -> Optional[str]:
         return None
     except Exception as exc:
         logger.debug("Could not extract DOI from %s: %s", url, exc)
+        return None
+
+
+def extract_article_type_from_html(html_text: str) -> Optional[str]:
+    """Extracts the normalized article type from publisher HTML meta tags or dataLayer."""
+    if not html_text:
+        return None
+
+    meta_patterns = [
+        r'<meta\b[^>]*\bname=["\']citation_article_type["\'][^>]*\bcontent=["\']([^"\']+)["\']',
+        r'<meta\b[^>]*\bcontent=["\']([^"\']+)["\'][^>]*\bname=["\']citation_article_type["\']',
+    ]
+    for pattern in meta_patterns:
+        match = re.search(pattern, html_text, re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1)).strip()
+
+    datalayer_patterns = [
+        r'"contentType"\s*:\s*"([^"]+)"',
+        r'"webtrendsPrimaryArticleType"\s*:\s*"([^"]+)"',
+    ]
+    for pattern in datalayer_patterns:
+        match = re.search(pattern, html_text, re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1)).strip()
+
+    return None
+
+
+def is_secondary_article_type(article_type: Optional[str]) -> bool:
+    """Returns True if the article type represents commentary, editorial, or correction content."""
+    if not article_type:
+        return False
+    normalized = " ".join(html.unescape(article_type).lower().split())
+    if normalized in SECONDARY_ARTICLE_TYPES:
+        return True
+    return normalized.startswith(("correction", "erratum", "editorial", "news & views", "news and views"))
+
+
+def fetch_article_type(url: str, timeout: int = 8) -> Optional[str]:
+    """Fetches article_type metadata from supported publisher webpages (fails open on errors)."""
+    if not url:
+        return None
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if not any(host == domain or host.endswith(f".{domain}") for domain in ARTICLE_TYPE_CHECK_HOSTS):
+        return None
+
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+    )
+    opener.addheaders = [
+        (
+            "User-Agent",
+            "Mozilla/5.0 (compatible; MaterialsNewsDigestBot/2.0; "
+            "+https://github.com/phynite-lab/materials-news-bot)",
+        )
+    ]
+    try:
+        with opener.open(url, timeout=timeout) as resp:
+            html_text = resp.read(200000).decode("utf-8", errors="ignore")
+        return extract_article_type_from_html(html_text)
+    except Exception as exc:
+        logger.debug("Could not fetch article type from %s: %s", url, exc)
         return None
 
 
@@ -1157,7 +1276,29 @@ def run_digest(
                     item["title"],
                 )
 
-        selected = qualifying[:limit]
+        # Verify top qualifying candidates are primary research articles
+        # (excludes Nature News & Views, Editorial, Why it matters, etc.
+        # whose RSS entries omit article-type markers in <title>)
+        selected = []
+        article_type_cache: Dict[str, Optional[str]] = {}
+        for candidate in qualifying:
+            if len(selected) >= limit:
+                break
+            cand_link = candidate.get("link", "")
+            if cand_link not in article_type_cache:
+                article_type_cache[cand_link] = fetch_article_type(cand_link)
+            art_type = article_type_cache[cand_link]
+            if is_secondary_article_type(art_type):
+                logger.info(
+                    "Skipping non-primary article [%s]: %s (%s)",
+                    art_type,
+                    candidate["title"],
+                    cand_link,
+                )
+                continue
+            if art_type:
+                candidate["article_type"] = art_type
+            selected.append(candidate)
 
         if not selected:
             logger.info(
